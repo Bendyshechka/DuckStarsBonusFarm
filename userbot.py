@@ -11,7 +11,18 @@ from telethon.errors import FloodWaitError
 
 # --- ЗАГРУЗКА КОНФИГА ---
 CONFIG_FILE = 'config.json'
+# --- НАСТРОЙКИ ВЕРСИИ И БАННЕРА ---
+VERSION = "1.0.1"
 
+BANNER = f"""
+╔══════════════════════════════════════════════╗
+║          🦆 DUCK FARM v{VERSION}             ║
+╚══════════════════════════════════════════════╝
+"""
+
+# Функция для красивой очистки экрана (поддерживает и Windows, и Linux/Ubuntu)
+def clear_screen():
+    os.system('cls' if os.name == 'nt' else 'clear')
 
 def load_config():
     """Загружает конфигурацию из JSON-файла."""
@@ -73,6 +84,7 @@ STATE_FILE = 'farm_state.json'
 bot_states = {bot: 'IDLE' for bot in TARGET_BOTS}
 transfer_amounts = {bot: 0.0 for bot in TARGET_BOTS}
 bot_intervals = {bot: 1200 for bot in TARGET_BOTS}
+bot_waiting_since = {bot: 0.0 for bot in TARGET_BOTS}  # НОВОЕ: Фиксируем время пропажи ссылки
 my_user_id = None
 
 # Создание клиента с учетом прокси
@@ -116,20 +128,16 @@ async def estimate_bot_interval(bot_name):
         messages = await client.get_messages(bot_name, limit=40)
         intervals = []
 
-        # Сообщения идут от новых к старым (index 0 = самое новое)
         for i in range(len(messages) - 1):
             if "Ссылка вернулась" in (messages[i].text or ""):
                 for j in range(i + 1, len(messages)):
                     if "пропала из твоего профиля!" in (messages[j].text or ""):
-                        # Считаем разницу во времени
                         diff = messages[i].date.timestamp() - messages[j].date.timestamp()
-                        # Разумные ограничения: от 5 минут до 60 минут
                         if 300 <= diff <= 3600:
                             intervals.append(diff)
-                        break  # Нашли пару, идем дальше
+                        break
 
         if intervals:
-            # Берем среднее значение последних удачных интервалов
             avg_interval = sum(intervals[:3]) / len(intervals[:3])
             print(f"⏱ [{bot_name}]: Вычислен интервал проверки бота: ~{int(avg_interval // 60)} мин.")
             return avg_interval
@@ -138,22 +146,21 @@ async def estimate_bot_interval(bot_name):
         print(f"❌ Ошибка вычисления интервала для {bot_name}: {e}")
 
     print(f"⏱ [{bot_name}]: Мало свежих данных. Ставлю интервал по умолчанию (20 мин).")
-    return 1200  # 20 минут по умолчанию
+    return 1200
 
 
 async def sync_states_from_history():
     print("🔍 Проверяю историю переписки и считаю тайминги...")
     for bot in TARGET_BOTS:
-        # 1. Высчитываем тайминги бота
         bot_intervals[bot] = await estimate_bot_interval(bot)
 
-        # 2. Восстанавливаем статус
         try:
             messages = await client.get_messages(bot, limit=3)
             for msg in messages:
                 if not msg.text: continue
                 if "пропала из твоего профиля!" in msg.text:
                     bot_states[bot] = 'WAITING'
+                    bot_waiting_since[bot] = msg.date.timestamp()  # Фиксируем реальное время с прошлого сообщения
                     break
                 elif "Ссылка вернулась" in msg.text:
                     bot_states[bot] = 'TRANSFERRING'
@@ -191,7 +198,6 @@ def parse_balance(text):
 
 
 # --- УМНЫЙ РОТАТОР ---
-
 async def bio_rotator():
     current_bio_bot = None
     last_swap_time = 0
@@ -213,23 +219,42 @@ async def bio_rotator():
                     print(f"✏️ В био установлена ссылка для: {target}")
                     await client(UpdateProfileRequest(about=link))
                     current_bio_bot = target
+                    last_swap_time = time.time()
 
             else:
-                # Если ждут ОБА бота, используем логику "Капкана"
+                # Если ждут ОБА бота, включаем умную логику
                 now = time.time()
+                other_bot = waiting_bots[0] if current_bio_bot != waiting_bots[0] else waiting_bots[1]
 
-                # Сколько держать ссылку текущего бота?
-                # Берём его высчитанный интервал + 3 минуты сверху для надежности (180 сек)
-                hold_time = bot_intervals.get(current_bio_bot, 1200) + 180
+                time_in_bio = now - last_swap_time
 
-                # Если время вышло ИЛИ в био стоит вообще чужой бот
-                if now - last_swap_time > hold_time or current_bio_bot not in waiting_bots:
-                    # Выбираем следующего бота
-                    next_bot = waiting_bots[0] if current_bio_bot != waiting_bots[0] else waiting_bots[1]
+                # Высчитываем расчетное время, когда текущий бот должен чекнуть
+                expected_check_current = bot_waiting_since.get(current_bio_bot, now) + bot_intervals.get(
+                    current_bio_bot, 1200)
+                time_left_current = expected_check_current - now
+
+                # 1. Жесткое ограничение 30 минут (1800 сек) в био
+                if time_in_bio >= 1800:
+                    print(f"⏳ [Лимит] {current_bio_bot} висит в био 30 минут! Свапаем принудительно.")
+                    next_bot = other_bot
+
+                # 2. Если текущему боту осталось ждать МЕНЬШЕ, чем полный интервал другого бота
+                # (или время уже ушло в минус, и чек вот-вот будет) — даем долутать.
+                elif time_left_current < bot_intervals.get(other_bot, 1200):
+                    next_bot = current_bio_bot
+
+                # 3. В противном случае, отдаем био тому, чей чек ожидается раньше
+                else:
+                    expected_check_other = bot_waiting_since.get(other_bot, now) + bot_intervals.get(other_bot, 1200)
+                    next_bot = current_bio_bot if expected_check_current <= expected_check_other else other_bot
+
+                # Применяем изменения, если нужно сменить бота
+                if next_bot != current_bio_bot:
                     link = f"https://t.me/{next_bot}?start=ref_{my_user_id}"
 
-                    next_hold_mins = int((bot_intervals.get(next_bot, 1200) + 180) // 60)
-                    print(f"🔄 Ротация: Ставлю {next_bot}. Капкан взведен на {next_hold_mins} минут.")
+                    time_left_mins = max(0, int((bot_waiting_since.get(next_bot, now) + bot_intervals.get(next_bot,
+                                                                                                          1200) - now) // 60))
+                    print(f"🔄 Ротация: Ставлю {next_bot}. (До его чека примерно {time_left_mins} мин)")
 
                     await client(UpdateProfileRequest(about=link))
                     current_bio_bot = next_bot
@@ -244,7 +269,6 @@ async def bio_rotator():
 
 
 # --- ОБРАБОТЧИК СООБЩЕНИЙ ---
-
 @client.on(events.NewMessage(chats=TARGET_BOTS))
 async def handle_bot_messages(event):
     chat = await event.get_chat()
@@ -254,6 +278,7 @@ async def handle_bot_messages(event):
     if "пропала из твоего профиля!" in text:
         print(f"🤖 [{bot_name}]: Обнаружил пропажу ссылки.")
         bot_states[bot_name] = 'WAITING'
+        bot_waiting_since[bot_name] = time.time()  # НОВОЕ: Фиксируем момент, когда бот ушел в WAITING
         save_state()
 
     elif "Ссылка вернулась" in text:
@@ -261,7 +286,6 @@ async def handle_bot_messages(event):
         bot_states[bot_name] = 'TRANSFERRING'
         save_state()
 
-        # Пересчитываем интервал после успешного цикла, чтобы адаптироваться к изменениям
         bot_intervals[bot_name] = await estimate_bot_interval(bot_name)
 
         delay = random.randint(10, 20)
@@ -300,49 +324,29 @@ async def handle_bot_messages(event):
                     await button.click()
                     return
 
-
     elif "Успех!" in text and "комиссия: 5%" in text:
-
         stars_match = re.search(r"(\d+(?:\.\d+)?)\s*⭐", text)
-
         stars_amount = stars_match.group(1) if stars_match else transfer_amounts.get(bot_name, "?")
-
-        # Парсим комиссию и итоговую сумму
-
         commission_match = re.search(r"комиссия:\s*([\d.]+)\s*⭐", text)
-
         total_match = re.search(r"Итого:\s*([\d.]+)\s*⭐", text)
 
         commission = commission_match.group(1) if commission_match else "?"
-
         total_amount = total_match.group(1) if total_match else stars_amount
 
-        # Красивое оформление
-
         notification_text = (
-
             f"💰 <b>Успешный перевод!</b>\n"
-
             f"├─ От: <code>@{bot_name}</code>\n"
-
             f"├─ Кому: {RECIPIENT}\n"
-
             f"├─ Сумма: <b>{stars_amount} ⭐</b>\n"
-
             f"├─ Комиссия: {commission} ⭐\n"
-
             f"└─ Итого получено: <b>{total_amount} ⭐</b>\n\n"
-
             f"✅ <i>Цикл для @{bot_name} завершён</i>"
-
         )
 
         await send_notification(notification_text)
 
         bot_states[bot_name] = 'IDLE'
-
         transfer_amounts[bot_name] = 0.0
-
         save_state()
 
         print(f"🎯 Цикл для {bot_name} завершен. Переведено: {stars_amount} ⭐")
@@ -350,6 +354,14 @@ async def handle_bot_messages(event):
 
 async def main():
     global my_user_id
+
+    # 1. Очищаем экран и выводим красивую шапку при старте
+    clear_screen()
+    print(BANNER)
+    print("⏳ Инициализация и подключение к Telegram...")
+    print("─" * 46)
+
+    # 2. Дальше идет твой стандартный код запуска
     await client.start()
 
     me = await client.get_me()
@@ -358,7 +370,12 @@ async def main():
     load_state()
     await sync_states_from_history()
 
-    print(f"🚀 Юзербот запущен. ID: {my_user_id}")
+    # Изменим этот принт, чтобы он тоже выглядел аккуратно под баннером
+    print("─" * 46)
+    print(f"🚀 Юзербот успешно запущен! ID аккаунта: {my_user_id}")
+    print("🤖 Мониторинг ботов активен. Нажмите Ctrl+C для остановки.")
+    print("─" * 46)
+
     client.loop.create_task(bio_rotator())
     await client.run_until_disconnected()
 
