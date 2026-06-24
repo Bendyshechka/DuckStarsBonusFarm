@@ -3,5 +3,11 @@
     "api_hash": "",
     "recipient": "",
     "bot_token": "",
-    "group_id": "-1002874259282"
+    "group_id": "-1002874259282",
+    "proxy": {
+        "enabled": false,
+        "server": "127.0.0.1",
+        "port": 1443,
+        "secret": "253e637831db6d1583e995b7a0c15cc6"
+    }
 }
