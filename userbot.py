@@ -28,6 +28,15 @@ def load_config():
             print("Запустите config_setup.py для настройки.")
             exit(1)
 
+        # Обеспечиваем наличие секции proxy
+        if 'proxy' not in config:
+            config['proxy'] = {
+                "enabled": False,
+                "server": "",
+                "port": 0,
+                "secret": ""
+            }
+
         return config
     except FileNotFoundError:
         print("❌ Файл config.json не найден!")
@@ -47,23 +56,36 @@ RECIPIENT = config['recipient']
 BOT_TOKEN = config['bot_token']
 GROUP_ID = config['group_id']
 
+# --- НАСТРОЙКА ПРОКСИ ---
+PROXY_ENABLED = config['proxy'].get('enabled', False)
+PROXY_SERVER = config['proxy'].get('server', '')
+PROXY_PORT = config['proxy'].get('port', 0)
+PROXY_SECRET = config['proxy'].get('secret', '')
+
 SESSION_NAME = 'duck_farm_session'
 
-# НАСТРОЙКИ ФЕРМЫ
+# НАСТРОЙКИ ФЕРМЫ (неизменяемые)
 TARGET_BOTS = ['duckearnbot', 'KtoTutRobot']
 CLEAN_BIO = "Обычное био человека"
 STATE_FILE = 'farm_state.json'
 
-
 # Глобальные переменные состояния
 bot_states = {bot: 'IDLE' for bot in TARGET_BOTS}
 transfer_amounts = {bot: 0.0 for bot in TARGET_BOTS}
-bot_intervals = {bot: 1200 for bot in TARGET_BOTS}  # По умолчанию 20 минут (1200 сек)
+bot_intervals = {bot: 1200 for bot in TARGET_BOTS}
 my_user_id = None
 
-client = TelegramClient(SESSION_NAME, API_ID, API_HASH,
-                        connection=connection.ConnectionTcpMTProxyRandomizedIntermediate,
-                        proxy=('127.0.0.1', 1443, '253e637831db6d1583e995b7a0c15cc6'))
+# Создание клиента с учетом прокси
+if PROXY_ENABLED and PROXY_SERVER and PROXY_PORT and PROXY_SECRET:
+    print(f"🔐 Подключаюсь через MTProto прокси: {PROXY_SERVER}:{PROXY_PORT}")
+    client = TelegramClient(
+        SESSION_NAME, API_ID, API_HASH,
+        connection=connection.ConnectionTcpMTProxyRandomizedIntermediate,
+        proxy=(PROXY_SERVER, PROXY_PORT, PROXY_SECRET)
+    )
+else:
+    print("🔓 Подключаюсь напрямую (без прокси)")
+    client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
 
 
 def load_state():
